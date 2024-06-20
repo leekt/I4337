@@ -3,13 +3,13 @@
  ** Only one instance required on each chain.
  **/
 // SPDX-License-Identifier: GPL-3.0
-pragma solidity ^0.8.12;
+pragma solidity >=0.7.5;
 
 /* solhint-disable avoid-low-level-calls */
 /* solhint-disable no-inline-assembly */
 /* solhint-disable reason-string */
 
-import "./UserOperation.sol";
+import "./PackedUserOperation.sol";
 import "./IStakeManager.sol";
 import "./IAggregator.sol";
 import "./INonceManager.sol";
@@ -65,6 +65,32 @@ interface IEntryPoint is IStakeManager, INonceManager {
     );
 
     /**
+     * An event emitted if the UserOperation Paymaster's "postOp" call reverted with non-zero length.
+     * @param userOpHash   - The request unique identifier.
+     * @param sender       - The sender of this request.
+     * @param nonce        - The nonce used in the request.
+     * @param revertReason - The return bytes from the (reverted) call to "callData".
+     */
+    event PostOpRevertReason(
+        bytes32 indexed userOpHash,
+        address indexed sender,
+        uint256 nonce,
+        bytes revertReason
+    );
+
+    /**
+     * UserOp consumed more than prefund. The UserOperation is reverted, and no refund is made.
+     * @param userOpHash   - The request unique identifier.
+     * @param sender       - The sender of this request.
+     * @param nonce        - The nonce used in the request.
+     */
+    event UserOperationPrefundTooLow(
+        bytes32 indexed userOpHash,
+        address indexed sender,
+        uint256 nonce
+    );
+
+    /**
      * An event emitted by handleOps(), before starting the execution loop.
      * Any event emitted before this event, is part of the validation.
      */
@@ -89,6 +115,17 @@ interface IEntryPoint is IStakeManager, INonceManager {
     error FailedOp(uint256 opIndex, string reason);
 
     /**
+     * A custom revert error of handleOps, to report a revert by account or paymaster.
+     * @param opIndex - Index into the array of ops to the failed one (in simulateValidation, this is always zero).
+     * @param reason  - Revert reason. see FailedOp(uint256,string), above
+     * @param inner   - data from inner cought revert reason
+     * @dev note that inner is truncated to 2048 bytes
+     */
+    error FailedOpWithRevert(uint256 opIndex, string reason, bytes inner);
+
+    error PostOpReverted(bytes returnData);
+
+    /**
      * Error case when a signature aggregator fails to verify the aggregated signature it had created.
      * @param aggregator The aggregator that failed to verify the signature
      */
@@ -99,7 +136,7 @@ interface IEntryPoint is IStakeManager, INonceManager {
 
     // UserOps handled, per aggregator.
     struct UserOpsPerAggregator {
-        UserOperation[] userOps;
+        PackedUserOperation[] userOps;
         // Aggregator address
         IAggregator aggregator;
         // Aggregated signature
@@ -115,7 +152,7 @@ interface IEntryPoint is IStakeManager, INonceManager {
      * @param beneficiary - The address to receive the fees.
      */
     function handleOps(
-        UserOperation[] calldata ops,
+        PackedUserOperation[] calldata ops,
         address payable beneficiary
     ) external;
 
@@ -133,26 +170,25 @@ interface IEntryPoint is IStakeManager, INonceManager {
      * Generate a request Id - unique identifier for this request.
      * The request ID is a hash over the content of the userOp (except the signature), the entrypoint and the chainid.
      * @param userOp - The user operation to generate the request ID for.
+     * @return hash the hash of this UserOperation
      */
     function getUserOpHash(
-        UserOperation calldata userOp
+        PackedUserOperation calldata userOp
     ) external view returns (bytes32);
 
     /**
      * Gas and return values during simulation.
      * @param preOpGas         - The gas used for validation (including preValidationGas)
      * @param prefund          - The required prefund for this operation
-     * @param sigFailed        - ValidateUserOp's (or paymaster's) signature check failed
-     * @param validAfter       - First timestamp this UserOp is valid (merging account and paymaster time-range)
-     * @param validUntil       - Last timestamp this UserOp is valid (merging account and paymaster time-range)
+     * @param accountValidationData   - returned validationData from account.
+     * @param paymasterValidationData - return validationData from paymaster.
      * @param paymasterContext - Returned by validatePaymasterUserOp (to be passed into postOp)
      */
     struct ReturnInfo {
         uint256 preOpGas;
         uint256 prefund;
-        bool sigFailed;
-        uint48 validAfter;
-        uint48 validUntil;
+        uint256 accountValidationData;
+        uint256 paymasterValidationData;
         bytes paymasterContext;
     }
 
@@ -173,4 +209,15 @@ interface IEntryPoint is IStakeManager, INonceManager {
      */
     function getSenderAddress(bytes memory initCode) external;
 
+    error DelegateAndRevert(bool success, bytes ret);
+
+    /**
+     * Helper method for dry-run testing.
+     * @dev calling this method, the EntryPoint will make a delegatecall to the given data, and report (via revert) the result.
+     *  The method always revert, so is only useful off-chain for dry run calls, in cases where state-override to replace
+     *  actual EntryPoint code is less convenient.
+     * @param target a target contract to make a delegatecall from entrypoint
+     * @param data data to pass to target in a delegatecall
+     */
+    function delegateAndRevert(address target, bytes calldata data) external;
 }
